@@ -1,7 +1,5 @@
 import os
 import asyncio
-import sqlite3
-import time
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, executor, types
@@ -14,20 +12,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# ================= DATABASE =================
-conn = sqlite3.connect("bot.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS reminders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    text TEXT,
-    remind_ts INTEGER,
-    sent INTEGER DEFAULT 0
-)
-""")
-conn.commit()
 
 # ================= STATE =================
 class Register(StatesGroup):
@@ -37,6 +21,7 @@ class Register(StatesGroup):
 class Reminder(StatesGroup):
     time = State()
     text = State()
+
 
 # ================= START =================
 @dp.message_handler(commands=['start'])
@@ -50,6 +35,7 @@ async def start(message: types.Message):
     )
     await Register.phone.set()
 
+
 # ================= PHONE =================
 @dp.message_handler(content_types=types.ContentType.CONTACT, state=Register.phone)
 async def get_phone(message: types.Message, state: FSMContext):
@@ -58,6 +44,7 @@ async def get_phone(message: types.Message, state: FSMContext):
         reply_markup=types.ReplyKeyboardRemove()
     )
     await Register.fullname.set()
+
 
 # ================= FULL NAME =================
 @dp.message_handler(state=Register.fullname)
@@ -71,68 +58,57 @@ async def get_name(message: types.Message, state: FSMContext):
     )
     await state.finish()
 
+
 # ================= REMINDER START =================
 @dp.message_handler(lambda m: m.text == "🔔 Eslatma")
 async def reminder_start(message: types.Message):
     await message.answer(
         "⏰ Eslatma vaqtini yoz\n\n"
         "Format:\n"
+        "YYYY-MM-DD HH:MM\n\n"
+        "Masalan:\n"
         "2026-01-05 18:30"
     )
     await Reminder.time.set()
+
 
 # ================= REMINDER TIME =================
 @dp.message_handler(state=Reminder.time)
 async def reminder_time(message: types.Message, state: FSMContext):
     try:
-        dt = datetime.strptime(message.text, "%Y-%m-%d %H:%M")
-        ts = int(dt.timestamp())
+        remind_time = datetime.strptime(message.text, "%Y-%m-%d %H:%M")
+        seconds = (remind_time - datetime.now()).total_seconds()
 
-        if ts <= int(time.time()):
-            await message.answer("❌ O‘tmish vaqt bo‘lishi mumkin emas")
+        if seconds <= 0:
+            await message.answer("❌ Bu vaqt o‘tib ketgan")
             return
 
-        await state.update_data(remind_ts=ts)
+        await state.update_data(seconds=seconds)
         await message.answer("✍️ Eslatma matnini yoz")
         await Reminder.text.set()
     except:
         await message.answer("❌ Format xato\nMasalan: 2026-01-05 18:30")
 
+
 # ================= REMINDER TEXT =================
 @dp.message_handler(state=Reminder.text)
 async def reminder_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
+    seconds = data["seconds"]
+    text = message.text
 
-    cursor.execute(
-        "INSERT INTO reminders (user_id, text, remind_ts) VALUES (?, ?, ?)",
-        (message.from_user.id, message.text, data["remind_ts"])
-    )
-    conn.commit()
+    asyncio.create_task(send_reminder(message.chat.id, seconds, text))
 
-    await message.answer("✅ Eslatma saqlandi. Belgilangan vaqtda xabar beraman.")
+    await message.answer("✅ Eslatma qo‘shildi. Belgilangan vaqtda xabar keladi.")
     await state.finish()
 
-# ================= CHECK REMINDERS =================
-async def reminder_checker():
-    print("REMINDER CHECKER STARTED")  # 👈 LOG
-    while True:
-        now = int(time.time())
 
-        cursor.execute(
-            "SELECT id, user_id, text FROM reminders WHERE sent = 0 AND remind_ts <= ?",
-            (now,)
-        )
-        rows = cursor.fetchall()
+# ================= SEND REMINDER =================
+async def send_reminder(chat_id, seconds, text):
+    await asyncio.sleep(seconds)
+    await bot.send_message(chat_id, f"🔔 ESLATMA:\n\n{text}")
 
-        for r in rows:
-            await bot.send_message(r[1], f"🔔 ESLATMA:\n\n{r[2]}")
-            cursor.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (r[0],))
-            conn.commit()
-
-        await asyncio.sleep(10)
 
 # ================= RUN =================
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.create_task(reminder_checker())  # 👈 MAJBURIY ISHGA TUSHADI
     executor.start_polling(dp, skip_updates=True)
