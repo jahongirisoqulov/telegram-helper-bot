@@ -1,0 +1,2 @@
+BOT_TOKEN = "8557416786:AAH2hYHBuHSfhqKgtarDYfoWlKyIYPPWMx4"
+CHANNEL_USERNAME = "@mustafoaikanal"
