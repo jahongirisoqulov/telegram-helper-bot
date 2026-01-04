@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import time
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, executor, types
@@ -14,7 +15,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
 # ================= DATABASE =================
-conn = sqlite3.connect("bot.db")
+conn = sqlite3.connect("bot.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute("""
@@ -22,7 +23,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     text TEXT,
-    remind_time TEXT,
+    remind_ts INTEGER,
     sent INTEGER DEFAULT 0
 )
 """)
@@ -84,8 +85,14 @@ async def reminder_start(message: types.Message):
 @dp.message_handler(state=Reminder.time)
 async def reminder_time(message: types.Message, state: FSMContext):
     try:
-        remind_time = datetime.strptime(message.text, "%Y-%m-%d %H:%M")
-        await state.update_data(remind_time=remind_time)
+        dt = datetime.strptime(message.text, "%Y-%m-%d %H:%M")
+        ts = int(dt.timestamp())
+
+        if ts <= int(time.time()):
+            await message.answer("❌ O‘tmish vaqt bo‘lishi mumkin emas")
+            return
+
+        await state.update_data(remind_ts=ts)
         await message.answer("✍️ Eslatma matnini yoz")
         await Reminder.text.set()
     except:
@@ -95,11 +102,10 @@ async def reminder_time(message: types.Message, state: FSMContext):
 @dp.message_handler(state=Reminder.text)
 async def reminder_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    remind_time = data["remind_time"]
 
     cursor.execute(
-        "INSERT INTO reminders (user_id, text, remind_time) VALUES (?, ?, ?)",
-        (message.from_user.id, message.text, remind_time.strftime("%Y-%m-%d %H:%M"))
+        "INSERT INTO reminders (user_id, text, remind_ts) VALUES (?, ?, ?)",
+        (message.from_user.id, message.text, data["remind_ts"])
     )
     conn.commit()
 
@@ -109,10 +115,10 @@ async def reminder_text(message: types.Message, state: FSMContext):
 # ================= CHECK REMINDERS =================
 async def reminder_checker():
     while True:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        now = int(time.time())
 
         cursor.execute(
-            "SELECT id, user_id, text FROM reminders WHERE sent = 0 AND remind_time <= ?",
+            "SELECT id, user_id, text FROM reminders WHERE sent = 0 AND remind_ts <= ?",
             (now,)
         )
         rows = cursor.fetchall()
@@ -122,7 +128,7 @@ async def reminder_checker():
             cursor.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (r[0],))
             conn.commit()
 
-        await asyncio.sleep(30)
+        await asyncio.sleep(15)
 
 # ================= RUN =================
 if __name__ == "__main__":
