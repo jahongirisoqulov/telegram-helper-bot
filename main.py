@@ -1,5 +1,6 @@
 import os
 import asyncio
+import sqlite3
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, executor, types
@@ -12,15 +13,37 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# 🇺🇿 O‘zbekiston vaqti (UTC+5)
+# ================= TIME =================
 def uz_now():
     return datetime.utcnow() + timedelta(hours=5)
 
-# ================= STORAGE =================
-# oddiy xotira (keyin bazaga o‘tkazamiz)
-reminders = {}  # user_id: [ {id, time, text, task} ]
+# ================= DATABASE =================
+db = sqlite3.connect("bot.db", check_same_thread=False)
+cur = db.cursor()
 
-# ================= STATE =================
+cur.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    full_name TEXT,
+    phone TEXT
+)
+""")
+
+cur.execute("""
+CREATE TABLE IF NOT EXISTS money (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    amount INTEGER,
+    type TEXT,
+    created_at TEXT
+)
+""")
+db.commit()
+
+# ================= STORAGE =================
+reminders = {}  # vaqtinchalik (RAM)
+
+# ================= STATES =================
 class Register(StatesGroup):
     phone = State()
     fullname = State()
@@ -29,40 +52,55 @@ class Reminder(StatesGroup):
     time = State()
     text = State()
 
+class MoneyState(StatesGroup):
+    amount = State()
+
+# ================= HELPERS =================
+def is_registered(user_id):
+    cur.execute("SELECT 1 FROM users WHERE user_id=?", (user_id,))
+    return cur.fetchone() is not None
+
+def main_menu():
+    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add("🔔 Eslatma qo‘shish", "📋 Eslatmalarim")
+    kb.add("➕ Kirim", "➖ Chiqim")
+    kb.add("💼 Balans")
+    return kb
+
 # ================= START =================
 @dp.message_handler(commands=['start'])
 async def start(message: types.Message):
+    if is_registered(message.from_user.id):
+        await message.answer("👋 Xush kelibsan!", reply_markup=main_menu())
+        return
+
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     kb.add(types.KeyboardButton("📱 Telefon raqam yuborish", request_contact=True))
     await message.answer("📱 Telefon raqamingni yubor", reply_markup=kb)
     await Register.phone.set()
 
-# ================= PHONE =================
+# ================= REGISTER =================
 @dp.message_handler(content_types=types.ContentType.CONTACT, state=Register.phone)
 async def phone(message: types.Message, state: FSMContext):
-    await message.answer(
-        "👤 Ism familiyangni yoz\nMasalan: Jahongir Isoqulov",
-        reply_markup=types.ReplyKeyboardRemove()
-    )
+    await state.update_data(phone=message.contact.phone_number)
+    await message.answer("👤 Ism familiyangni yoz", reply_markup=types.ReplyKeyboardRemove())
     await Register.fullname.set()
 
-# ================= FULL NAME =================
 @dp.message_handler(state=Register.fullname)
 async def fullname(message: types.Message, state: FSMContext):
-    kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add("🔔 Eslatma qo‘shish")
-    kb.add("📋 Eslatmalarim")
-    await message.answer("✅ Tayyor! Menyudan tanla.", reply_markup=kb)
+    data = await state.get_data()
+    cur.execute(
+        "INSERT OR REPLACE INTO users VALUES (?, ?, ?)",
+        (message.from_user.id, message.text, data["phone"])
+    )
+    db.commit()
+    await message.answer("✅ Tayyor!", reply_markup=main_menu())
     await state.finish()
 
-# ================= ADD REMINDER =================
+# ================= REMINDER =================
 @dp.message_handler(lambda m: m.text == "🔔 Eslatma qo‘shish")
 async def add_reminder(message: types.Message):
-    await message.answer(
-        "⏰ Vaqtni yoz\n\n"
-        "Masalan:\n"
-        "2026-01-05 18:30"
-    )
+    await message.answer("⏰ Vaqt yoz\nMasalan: 2026-01-05 18:30")
     await Reminder.time.set()
 
 @dp.message_handler(state=Reminder.time)
@@ -71,76 +109,74 @@ async def reminder_time(message: types.Message, state: FSMContext):
         dt = datetime.strptime(message.text, "%Y-%m-%d %H:%M")
         seconds = (dt - uz_now()).total_seconds()
         if seconds <= 0:
-            await message.answer("❌ Bu vaqt o‘tib ketgan")
+            await message.answer("❌ O‘tib ketgan vaqt")
             return
-        await state.update_data(seconds=seconds, remind_time=dt)
-        await message.answer("✍️ Eslatma matnini yoz")
+        await state.update_data(seconds=seconds, time=dt)
+        await message.answer("✍️ Matn yoz")
         await Reminder.text.set()
     except:
-        await message.answer("❌ Format xato\nMasalan: 2026-01-05 18:30")
+        await message.answer("❌ Format xato")
 
 @dp.message_handler(state=Reminder.text)
 async def reminder_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    seconds = data["seconds"]
-    remind_time = data["remind_time"]
-    text = message.text
-
-    task = asyncio.create_task(send_reminder(message.chat.id, seconds, text))
-
-    user_list = reminders.setdefault(message.from_user.id, [])
-    reminder_id = len(user_list) + 1
-    user_list.append({
-        "id": reminder_id,
-        "time": remind_time,
-        "text": text,
-        "task": task
-    })
-
-    await message.answer("✅ Eslatma saqlandi")
+    task = asyncio.create_task(send_reminder(message.chat.id, data["seconds"], message.text))
+    reminders.setdefault(message.from_user.id, []).append(
+        {"time": data["time"], "text": message.text, "task": task}
+    )
+    await message.answer("✅ Eslatma saqlandi", reply_markup=main_menu())
     await state.finish()
 
 async def send_reminder(chat_id, seconds, text):
     await asyncio.sleep(seconds)
-    await bot.send_message(chat_id, f"🔔 ESLATMA:\n\n{text}")
+    await bot.send_message(chat_id, f"🔔 ESLATMA:\n{text}")
 
-# ================= LIST REMINDERS =================
 @dp.message_handler(lambda m: m.text == "📋 Eslatmalarim")
 async def list_reminders(message: types.Message):
-    user_list = reminders.get(message.from_user.id, [])
-
-    if not user_list:
-        await message.answer("📭 Hozircha eslatma yo‘q")
+    lst = reminders.get(message.from_user.id, [])
+    if not lst:
+        await message.answer("📭 Yo‘q")
         return
-
     text = "📋 Eslatmalar:\n\n"
-    kb = types.InlineKeyboardMarkup()
+    for r in lst:
+        text += f"{r['time'].strftime('%Y-%m-%d %H:%M')} — {r['text']}\n"
+    await message.answer(text)
 
-    for r in user_list:
-        text += f"🕒 {r['time'].strftime('%Y-%m-%d %H:%M')}\n{r['text']}\n\n"
-        kb.add(
-            types.InlineKeyboardButton(
-                text=f"❌ O‘chirish #{r['id']}",
-                callback_data=f"del_{r['id']}"
-            )
-        )
+# ================= MONEY =================
+@dp.message_handler(lambda m: m.text == "➕ Kirim")
+async def income(message: types.Message, state: FSMContext):
+    await state.update_data(type="in")
+    await message.answer("💰 Kirim summasini yoz")
+    await MoneyState.amount.set()
 
-    await message.answer(text, reply_markup=kb)
+@dp.message_handler(lambda m: m.text == "➖ Chiqim")
+async def expense(message: types.Message, state: FSMContext):
+    await state.update_data(type="out")
+    await message.answer("💸 Chiqim summasini yoz")
+    await MoneyState.amount.set()
 
-# ================= DELETE REMINDER =================
-@dp.callback_query_handler(lambda c: c.data.startswith("del_"))
-async def delete_reminder(call: types.CallbackQuery):
-    rid = int(call.data.split("_")[1])
-    user_list = reminders.get(call.from_user.id, [])
+@dp.message_handler(state=MoneyState.amount)
+async def save_money(message: types.Message, state: FSMContext):
+    if not message.text.isdigit():
+        await message.answer("❌ Faqat raqam yoz")
+        return
+    data = await state.get_data()
+    cur.execute(
+        "INSERT INTO money (user_id, amount, type, created_at) VALUES (?, ?, ?, ?)",
+        (message.from_user.id, int(message.text), data["type"], uz_now().isoformat())
+    )
+    db.commit()
+    await message.answer("✅ Saqlandi", reply_markup=main_menu())
+    await state.finish()
 
-    for r in user_list:
-        if r["id"] == rid:
-            r["task"].cancel()
-            user_list.remove(r)
-            await call.message.answer("❌ Eslatma o‘chirildi")
-            break
-
-    await call.answer()
+@dp.message_handler(lambda m: m.text == "💼 Balans")
+async def balance(message: types.Message):
+    cur.execute(
+        "SELECT SUM(CASE WHEN type='in' THEN amount ELSE -amount END) FROM money WHERE user_id=?",
+        (message.from_user.id,)
+    )
+    bal = cur.fetchone()[0] or 0
+    await message.answer(f"💼 Balans: {bal} so‘m")
 
 # ================= RUN =================
 if __name__ == "__main__":
