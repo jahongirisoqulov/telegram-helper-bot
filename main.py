@@ -114,6 +114,7 @@ async def reminder_text(message: types.Message, state: FSMContext):
 
 # ================= CHECK REMINDERS =================
 async def reminder_checker():
+    print("REMINDER CHECKER STARTED")  # 👈 LOG
     while True:
         now = int(time.time())
 
@@ -128,10 +129,10 @@ async def reminder_checker():
             cursor.execute("UPDATE reminders SET sent = 1 WHERE id = ?", (r[0],))
             conn.commit()
 
-        await asyncio.sleep(15)
+        await asyncio.sleep(10)
 
 # ================= RUN =================
 if __name__ == "__main__":
     loop = asyncio.get_event_loop()
-    loop.create_task(reminder_checker())
+    loop.create_task(reminder_checker())  # 👈 MAJBURIY ISHGA TUSHADI
     executor.start_polling(dp, skip_updates=True)
