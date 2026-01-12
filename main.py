@@ -290,7 +290,7 @@ async def del_money(call: types.CallbackQuery):
     mid = int(call.data.split("_")[1])
     cur.execute("DELETE FROM money WHERE id=?", (mid,))
     db.commit()
-    await call.message.answer("❌ Pul yozuvi o‘chirildi.")
+    await call.message.answer("❌ Pulni o'chirish.")
     await call.answer()
 
 # ================= ADMIN =================
